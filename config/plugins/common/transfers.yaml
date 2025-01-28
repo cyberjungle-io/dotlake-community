@@ -1,0 +1,66 @@
+name: transfers
+version: "1.0"
+description: "Common transfer event processor for all chains"
+
+event_handlers:
+  - name: transfer
+    types:
+      - balances.Transfer
+      - currencies.Transferred
+    fields:
+      - name: from_address
+        type: string
+        index: true
+      - name: to_address
+        type: string
+        index: true
+      - name: amount
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+      - name: asset_id
+        type: string
+        optional: true
+    
+  - name: transfer_batch
+    types:
+      - balances.TransferBatch
+    fields:
+      - name: from_address
+        type: string
+        index: true
+      - name: to_addresses
+        type: array
+        items: string
+      - name: amounts
+        type: array
+        items: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+database:
+  tables:
+    - name: transfers
+      columns:
+        - name: id
+          type: serial
+          primary_key: true
+        - name: block_number
+          type: bigint
+          index: true
+        - name: extrinsic_index
+          type: integer
+        - name: event_index
+          type: integer
+        - name: from_address
+          type: text
+          index: true
+        - name: to_address
+          type: text
+          index: true
+        - name: amount
+          type: numeric
+        - name: asset_id
+          type: text
+          nullable: true
+        - name: timestamp
+          type: timestamp
+          index: true 

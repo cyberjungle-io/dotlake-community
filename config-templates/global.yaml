@@ -1,0 +1,25 @@
+processing:
+  batch_size: 100
+  retry_attempts: 3
+  retry_delay: 5
+  gap_detection: true
+
+logging:
+  level: INFO
+  format: json
+  file: logs/indexer.log
+
+monitoring:
+  enabled: true
+  port: 9090
+  metrics:
+    - blocks_processed
+    - processing_lag
+    - event_counts
+    - error_counts
+
+database:
+  connection_pool_size: 10
+  max_overflow: 20
+  pool_timeout: 30
+  pool_recycle: 3600 

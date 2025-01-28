@@ -49,5 +49,8 @@ logs/
 .env.local
 .env.*.local
 
-# Project specific
-config.yaml 
+# Configuration
+/config/           # Real configuration directory
+config.yaml        # Root config file
+*.secret.yaml     # Any file with .secret in name
+*.local.yaml      # Any file with .local in name 

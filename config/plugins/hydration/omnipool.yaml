@@ -1,0 +1,100 @@
+name: omnipool
+version: "1.0"
+description: "Hydration Omnipool event processor"
+
+event_handlers:
+  - name: pool_created
+    types:
+      - omnipool.PoolCreated
+    fields:
+      - name: asset_id
+        type: string
+        index: true
+      - name: initial_price
+        type: decimal
+        transform: "value / (10 ^ 12)"  # Price decimals
+      - name: initial_liquidity
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+  - name: trade_executed
+    types:
+      - omnipool.TradeExecuted
+    fields:
+      - name: asset_in
+        type: string
+        index: true
+      - name: asset_out
+        type: string
+        index: true
+      - name: amount_in
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+      - name: amount_out
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+      - name: fee
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+  - name: liquidity_added
+    types:
+      - omnipool.LiquidityAdded
+    fields:
+      - name: asset_id
+        type: string
+        index: true
+      - name: amount
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+      - name: shares_minted
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+database:
+  tables:
+    - name: omnipool_trades
+      columns:
+        - name: id
+          type: serial
+          primary_key: true
+        - name: block_number
+          type: bigint
+          index: true
+        - name: extrinsic_index
+          type: integer
+        - name: event_index
+          type: integer
+        - name: asset_in
+          type: text
+          index: true
+        - name: asset_out
+          type: text
+          index: true
+        - name: amount_in
+          type: numeric
+        - name: amount_out
+          type: numeric
+        - name: fee
+          type: numeric
+        - name: timestamp
+          type: timestamp
+          index: true
+    
+    - name: omnipool_pools
+      columns:
+        - name: asset_id
+          type: text
+          primary_key: true
+        - name: creation_block
+          type: bigint
+        - name: initial_price
+          type: numeric
+        - name: initial_liquidity
+          type: numeric
+        - name: current_liquidity
+          type: numeric
+        - name: last_updated
+          type: timestamp
+        - name: created_at
+          type: timestamp 

@@ -1,0 +1,27 @@
+chain:
+  name: hydration
+  relay_chain: polkadot
+  wss: wss://hydradx-rpc.dwellir.com
+  start_block: 1000000
+  block_time: 12  # seconds
+  finality_threshold: 2  # blocks
+
+database:
+  type: postgres
+  host: ${HYDRATION_DB_HOST}
+  port: ${HYDRATION_DB_PORT}
+  name: ${HYDRATION_DB_NAME}
+  user: ${HYDRATION_DB_USER}
+  password: ${HYDRATION_DB_PASSWORD}
+  schema: public
+
+enabled_plugins:
+  - common.transfers
+  - common.balances
+  - hydration.omnipool
+
+chain_specific:
+  asset_decimals: 12
+  native_token: HDX
+  min_block_height: 0
+  genesis_hash: "0x0000000000000000000000000000000000000000000000000000000000000000" 

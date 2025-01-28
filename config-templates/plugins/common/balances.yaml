@@ -1,0 +1,87 @@
+name: balances
+version: "1.0"
+description: "Common balance tracking for all chains"
+
+event_handlers:
+  - name: balance_set
+    types:
+      - balances.BalanceSet
+    fields:
+      - name: account
+        type: string
+        index: true
+      - name: free
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+      - name: reserved
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+  - name: deposit
+    types:
+      - balances.Deposit
+    fields:
+      - name: account
+        type: string
+        index: true
+      - name: amount
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+  - name: withdraw
+    types:
+      - balances.Withdraw
+    fields:
+      - name: account
+        type: string
+        index: true
+      - name: amount
+        type: decimal
+        transform: "value / (10 ^ chain.asset_decimals)"
+
+database:
+  tables:
+    - name: account_balances
+      columns:
+        - name: account
+          type: text
+          primary_key: true
+        - name: free_balance
+          type: numeric
+        - name: reserved_balance
+          type: numeric
+        - name: total_balance
+          type: numeric
+        - name: nonce
+          type: bigint
+        - name: last_updated_block
+          type: bigint
+        - name: last_updated_at
+          type: timestamp
+        - name: created_at
+          type: timestamp
+
+    - name: balance_history
+      columns:
+        - name: id
+          type: serial
+          primary_key: true
+        - name: account
+          type: text
+          index: true
+        - name: block_number
+          type: bigint
+          index: true
+        - name: extrinsic_index
+          type: integer
+        - name: event_index
+          type: integer
+        - name: free_balance
+          type: numeric
+        - name: reserved_balance
+          type: numeric
+        - name: total_balance
+          type: numeric
+        - name: timestamp
+          type: timestamp
+          index: true 
