@@ -58,10 +58,157 @@ class BlockProcessor:
         try:
             # Create blocks table using old code
             self.create_tables(self.db_connection, self.db_config, self.chain_name, self.relay_chain)
-            logging.info("Successfully created tables")
+            
+            # Create assets table
+            cursor = self.db_connection.cursor()
+            create_assets_sql = """
+            CREATE TABLE IF NOT EXISTS assets (
+                asset_id TEXT PRIMARY KEY,
+                name TEXT,
+                symbol TEXT,
+                decimals INTEGER,
+                is_native BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+            cursor.execute(create_assets_sql)
+            
+            # Create transfers table
+            create_transfers_sql = """
+            CREATE TABLE IF NOT EXISTS transfers (
+                id SERIAL PRIMARY KEY,
+                block_number BIGINT,
+                timestamp TIMESTAMP,
+                asset_id TEXT REFERENCES assets(asset_id),
+                from_address TEXT,
+                to_address TEXT,
+                amount NUMERIC,
+                UNIQUE(block_number, from_address, to_address, asset_id, amount)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transfers_block_number ON transfers(block_number);
+            CREATE INDEX IF NOT EXISTS idx_transfers_from_address ON transfers(from_address);
+            CREATE INDEX IF NOT EXISTS idx_transfers_to_address ON transfers(to_address);
+            CREATE INDEX IF NOT EXISTS idx_transfers_asset_id ON transfers(asset_id);
+            """
+            cursor.execute(create_transfers_sql)
+            
+            # Insert or update known assets
+            insert_assets_sql = """
+            INSERT INTO assets (asset_id, name, symbol, decimals, is_native)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (asset_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                symbol = EXCLUDED.symbol,
+                decimals = EXCLUDED.decimals,
+                is_native = EXCLUDED.is_native
+            """
+            
+            # Known assets
+            known_assets = [
+                ('0', 'HydraDX', 'HDX', 12, True),  # Native token
+                ('1', 'Lrna', 'LRNA', 12, False),   # Fee token
+                ('5', 'Dai Stablecoin', 'DAI', 18, False),
+                ('102', 'USD Coin', 'USDC', 6, False)
+            ]
+            
+            for asset in known_assets:
+                cursor.execute(insert_assets_sql, asset)
+            
+            self.db_connection.commit()
+            cursor.close()
+            
+            logging.info("Successfully created tables and inserted known assets")
         except Exception as e:
             logging.error(f"Error creating tables: {str(e)}", exc_info=True)
             raise
+
+    def _get_asset_info_from_chain(self, asset_id: str) -> Optional[dict]:
+        """Query asset information from the chain's asset registry."""
+        try:
+            # Query the AssetRegistry pallet
+            result = self.substrate.query(
+                module='AssetRegistry',
+                storage_function='Assets',
+                params=[int(asset_id)]
+            )
+            
+            if result:
+                asset_data = result.value
+                logging.info(f"Found asset data from chain: {asset_data}")
+                
+                # Extract asset information
+                name = asset_data.get('name', f"Asset {asset_id}")
+                symbol = asset_data.get('symbol', f"ASSET{asset_id}")
+                decimals = asset_data.get('decimals', 12)
+                
+                return {
+                    'asset_id': asset_id,
+                    'name': name,
+                    'symbol': symbol,
+                    'decimals': decimals,
+                    'is_native': False
+                }
+            return None
+        except Exception as e:
+            logging.error(f"Error querying asset info from chain: {str(e)}", exc_info=True)
+            return None
+
+    def _save_new_asset(self, asset_info: dict):
+        """Save a new asset to the database."""
+        try:
+            cursor = self.db_connection.cursor()
+            
+            insert_sql = """
+            INSERT INTO assets (asset_id, name, symbol, decimals, is_native)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (asset_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                symbol = EXCLUDED.symbol,
+                decimals = EXCLUDED.decimals,
+                is_native = EXCLUDED.is_native
+            """
+            
+            cursor.execute(insert_sql, (
+                asset_info['asset_id'],
+                asset_info['name'],
+                asset_info['symbol'],
+                asset_info['decimals'],
+                asset_info['is_native']
+            ))
+            
+            self.db_connection.commit()
+            logging.info(f"Saved new asset: {asset_info}")
+            
+        except Exception as e:
+            self.db_connection.rollback()
+            logging.error(f"Error saving new asset: {str(e)}", exc_info=True)
+            raise
+        finally:
+            cursor.close()
+
+    def _get_asset_decimals(self, asset_id: str) -> int:
+        """Get decimals for an asset."""
+        try:
+            cursor = self.db_connection.cursor()
+            cursor.execute("SELECT decimals FROM assets WHERE asset_id = %s", (asset_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                return result[0]
+            else:
+                # Asset not found in database, try to get it from chain
+                asset_info = self._get_asset_info_from_chain(asset_id)
+                if asset_info:
+                    self._save_new_asset(asset_info)
+                    return asset_info['decimals']
+                else:
+                    # Default to 12 decimals if not found
+                    logging.warning(f"No decimals found for asset {asset_id}, using default of 12")
+                    return 12
+        except Exception as e:
+            logging.error(f"Error getting asset decimals: {str(e)}", exc_info=True)
+            return 12  # Default to 12 decimals on error
 
     def _get_block_timestamp(self, block_hash) -> int:
         """Get block timestamp from the timestamp extrinsic in the block."""
@@ -96,6 +243,103 @@ class BlockProcessor:
             logging.warning("Failed to get timestamp from chain: %s", str(e), exc_info=True)
             return int(time.time() * 1000)  # Fallback to current time
 
+    def _process_transfer_events(self, block_number: int, timestamp: int, events: List[dict]) -> List[dict]:
+        """Process transfer events from the block's events."""
+        transfers = []
+        
+        logging.info(f"Processing {len(events)} events from block {block_number}")
+        
+        for event in events:
+            # Only process Transferred events from currencies pallet
+            if (event['method']['pallet'] == 'Currencies' and 
+                event['method']['name'] == 'Transferred'):
+                try:
+                    logging.info(f"Found currencies.Transferred event: {event}")
+                    # Parse the data string into a dict
+                    data = json.loads(event['data'])
+                    logging.info(f"Parsed transfer data: {data}")
+                    
+                    asset_id = str(data['currency_id'])
+                    decimals = self._get_asset_decimals(asset_id)
+                    raw_amount = int(data['amount'])
+                    # Convert amount based on decimals
+                    amount = raw_amount / (10 ** decimals)
+                    
+                    transfer = {
+                        'block_number': block_number,
+                        'timestamp': datetime.fromtimestamp(timestamp/1000),
+                        'asset_id': asset_id,
+                        'from_address': data['from'],
+                        'to_address': data['to'],
+                        'amount': amount
+                    }
+                    transfers.append(transfer)
+                    logging.info(f"Found transfer in block {block_number}: {transfer}")
+                except Exception as e:
+                    logging.error(f"Error processing transfer event: {str(e)}", exc_info=True)
+                    continue
+        
+        logging.info(f"Found {len(transfers)} transfers in block {block_number}")
+        return transfers
+
+    def _save_transfers(self, transfers: List[dict]):
+        """Save transfer records to database.
+        
+        Args:
+            transfers: List of transfer records to save
+        """
+        if not transfers:
+            return
+            
+        try:
+            cursor = self.db_connection.cursor()
+            
+            # Create transfers table if it doesn't exist
+            create_table_sql = """
+            CREATE TABLE IF NOT EXISTS transfers (
+                id SERIAL PRIMARY KEY,
+                block_number BIGINT,
+                timestamp TIMESTAMP,
+                asset_id TEXT,
+                from_address TEXT,
+                to_address TEXT,
+                amount NUMERIC,
+                UNIQUE(block_number, from_address, to_address, asset_id, amount)
+            );
+            CREATE INDEX IF NOT EXISTS idx_transfers_block_number ON transfers(block_number);
+            CREATE INDEX IF NOT EXISTS idx_transfers_from_address ON transfers(from_address);
+            CREATE INDEX IF NOT EXISTS idx_transfers_to_address ON transfers(to_address);
+            CREATE INDEX IF NOT EXISTS idx_transfers_asset_id ON transfers(asset_id);
+            """
+            cursor.execute(create_table_sql)
+            
+            # Insert transfers
+            insert_sql = """
+            INSERT INTO transfers (block_number, timestamp, asset_id, from_address, to_address, amount)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (block_number, from_address, to_address, asset_id, amount) DO NOTHING
+            """
+            
+            for transfer in transfers:
+                cursor.execute(insert_sql, (
+                    transfer['block_number'],
+                    transfer['timestamp'],
+                    transfer['asset_id'],
+                    transfer['from_address'],
+                    transfer['to_address'],
+                    transfer['amount']
+                ))
+            
+            self.db_connection.commit()
+            logging.info(f"Successfully saved {len(transfers)} transfers")
+            
+        except Exception as e:
+            self.db_connection.rollback()
+            logging.error(f"Error saving transfers: {str(e)}", exc_info=True)
+            raise
+        finally:
+            cursor.close()
+
     def process_block(self, block_number: int) -> bool:
         """Process a single block."""
         try:
@@ -106,10 +350,6 @@ class BlockProcessor:
             
             # Get events for this block
             events = self.substrate.get_events(block_hash=block_hash)
-            
-            # Debug: Log unique event phases
-            phases = set(event.value.get('phase', '') for event in events)
-            logging.info(f"Event phases in block {block_number}: {phases}")
             
             # Process block data using old code's format
             block_data = {
@@ -199,6 +439,15 @@ class BlockProcessor:
                     extrinsic['info'] = json.dumps(extrinsic['info'])
                 for event in extrinsic.get('events', []):
                     event['data'] = json.dumps(event.get('data', {}))
+            
+            # Process and save transfers from onFinalize events
+            logging.info(f"onFinalize events for block {block_number}: {json.dumps(block_data['onFinalize']['events'], indent=2)}")
+            transfers = self._process_transfer_events(
+                block_number=block_number,
+                timestamp=block_timestamp,
+                events=block_data['onFinalize']['events']
+            )
+            self._save_transfers(transfers)
             
             # Insert block data using old code
             self.insert_block_data(self.db_connection, block_data, self.chain_name, self.relay_chain)
