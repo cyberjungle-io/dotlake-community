@@ -92,6 +92,95 @@ class BlockProcessor:
             """
             cursor.execute(create_transfers_sql)
             
+            # Create DEX operations table
+            create_dex_operations_sql = """
+            CREATE TABLE IF NOT EXISTS dex_operations (
+                id SERIAL PRIMARY KEY,
+                block_number BIGINT,
+                timestamp TIMESTAMP,
+                section TEXT,
+                method TEXT,
+                phase TEXT,
+                -- Common fields for all operations
+                trader_address TEXT,
+                operation_type TEXT,
+                -- Omnipool specific fields
+                asset_in TEXT REFERENCES assets(asset_id),
+                asset_in_symbol TEXT,
+                amount_in NUMERIC,
+                asset_out TEXT REFERENCES assets(asset_id),
+                asset_out_symbol TEXT,
+                amount_out NUMERIC,
+                hub_amount_in NUMERIC,
+                hub_amount_out NUMERIC,
+                asset_fee_amount NUMERIC,
+                protocol_fee_amount NUMERIC,
+                -- Broadcast specific fields
+                filler TEXT,
+                filler_type TEXT,
+                operation TEXT,
+                inputs JSONB,
+                outputs JSONB,
+                fees JSONB,
+                operation_stack JSONB,
+                -- Metadata
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                raw_data JSONB,
+                UNIQUE(block_number, section, method, trader_address, raw_data)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_block_number ON dex_operations(block_number);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_trader ON dex_operations(trader_address);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_section ON dex_operations(section);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_method ON dex_operations(method);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_timestamp ON dex_operations(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_operation_type ON dex_operations(operation_type);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_asset_in_symbol ON dex_operations(asset_in_symbol);
+            CREATE INDEX IF NOT EXISTS idx_dex_operations_asset_out_symbol ON dex_operations(asset_out_symbol);
+            """
+            cursor.execute(create_dex_operations_sql)
+            
+            # Create broadcast swaps table
+            create_broadcast_swaps_sql = """
+            CREATE TABLE IF NOT EXISTS broadcast_swaps (
+                id SERIAL PRIMARY KEY,
+                block_number BIGINT,
+                timestamp TIMESTAMP,
+                -- Core swap info
+                swapper TEXT,
+                filler TEXT,
+                filler_type TEXT,
+                operation TEXT,
+                -- Input asset
+                input_asset TEXT REFERENCES assets(asset_id),
+                input_asset_symbol TEXT,
+                input_amount NUMERIC,
+                -- Output asset
+                output_asset TEXT REFERENCES assets(asset_id),
+                output_asset_symbol TEXT,
+                output_amount NUMERIC,
+                -- Fee information
+                total_fee_amount NUMERIC,
+                fee_asset TEXT REFERENCES assets(asset_id),
+                fee_asset_symbol TEXT,
+                fee_destinations JSONB,  -- Array of {destination, amount}
+                -- Routing information
+                operation_stack JSONB,
+                -- Metadata
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                raw_data JSONB,
+                UNIQUE(block_number, swapper, input_asset, output_asset, input_amount, output_amount)
+            );
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_block_number ON broadcast_swaps(block_number);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_timestamp ON broadcast_swaps(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_swapper ON broadcast_swaps(swapper);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_filler ON broadcast_swaps(filler);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_operation ON broadcast_swaps(operation);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_input_asset_symbol ON broadcast_swaps(input_asset_symbol);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_output_asset_symbol ON broadcast_swaps(output_asset_symbol);
+            CREATE INDEX IF NOT EXISTS idx_broadcast_swaps_filler_type ON broadcast_swaps(filler_type);
+            """
+            cursor.execute(create_broadcast_swaps_sql)
+            
             # Insert or update known assets
             insert_assets_sql = """
             INSERT INTO assets (asset_id, name, symbol, decimals, is_native)
@@ -243,99 +332,266 @@ class BlockProcessor:
             logging.warning("Failed to get timestamp from chain: %s", str(e), exc_info=True)
             return int(time.time() * 1000)  # Fallback to current time
 
-    def _process_transfer_events(self, block_number: int, timestamp: int, events: List[dict]) -> List[dict]:
-        """Process transfer events from the block's events."""
-        transfers = []
-        
-        logging.info(f"Processing {len(events)} events from block {block_number}")
-        
-        for event in events:
-            # Only process Transferred events from currencies pallet
-            if (event['method']['pallet'] == 'Currencies' and 
-                event['method']['name'] == 'Transferred'):
-                try:
-                    logging.info(f"Found currencies.Transferred event: {event}")
-                    # Parse the data string into a dict
-                    data = json.loads(event['data'])
-                    logging.info(f"Parsed transfer data: {data}")
-                    
-                    asset_id = str(data['currency_id'])
-                    decimals = self._get_asset_decimals(asset_id)
-                    raw_amount = int(data['amount'])
-                    # Convert amount based on decimals
-                    amount = raw_amount / (10 ** decimals)
-                    
-                    transfer = {
-                        'block_number': block_number,
-                        'timestamp': datetime.fromtimestamp(timestamp/1000),
-                        'asset_id': asset_id,
-                        'from_address': data['from'],
-                        'to_address': data['to'],
-                        'amount': amount
-                    }
-                    transfers.append(transfer)
-                    logging.info(f"Found transfer in block {block_number}: {transfer}")
-                except Exception as e:
-                    logging.error(f"Error processing transfer event: {str(e)}", exc_info=True)
-                    continue
-        
-        logging.info(f"Found {len(transfers)} transfers in block {block_number}")
-        return transfers
-
-    def _save_transfers(self, transfers: List[dict]):
-        """Save transfer records to database.
+    def _ensure_asset_exists_and_get_symbol(self, asset_id: str) -> str:
+        """Ensure asset exists in database and return its symbol.
         
         Args:
-            transfers: List of transfer records to save
-        """
-        if not transfers:
-            return
+            asset_id: The asset ID to check/create
             
+        Returns:
+            The asset symbol
+        """
+        if asset_id is None:
+            return None
+            
+        cursor = self.db_connection.cursor()
+        try:
+            # Check if asset exists and get symbol
+            cursor.execute("SELECT symbol FROM assets WHERE asset_id = %s", (asset_id,))
+            result = cursor.fetchone()
+            
+            if not result:
+                # Asset doesn't exist, try to get info from chain
+                asset_info = self._get_asset_info_from_chain(asset_id)
+                if asset_info:
+                    self._save_new_asset(asset_info)
+                    return asset_info['symbol']
+                else:
+                    # If we can't get info, insert a placeholder
+                    symbol = f"ASSET{asset_id}"
+                    cursor.execute("""
+                        INSERT INTO assets (asset_id, name, symbol, decimals, is_native)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (asset_id) DO NOTHING
+                    """, (
+                        asset_id,
+                        f"Asset {asset_id}",
+                        symbol,
+                        12,  # Default decimals
+                        False
+                    ))
+                    self.db_connection.commit()
+                    return symbol
+            else:
+                return result[0]
+        finally:
+            cursor.close()
+
+    def _process_dex_events(self, block_number: int, timestamp: int, events: List[dict]) -> None:
+        """Process and save DEX-related events from the block."""
         try:
             cursor = self.db_connection.cursor()
             
-            # Create transfers table if it doesn't exist
-            create_table_sql = """
-            CREATE TABLE IF NOT EXISTS transfers (
-                id SERIAL PRIMARY KEY,
-                block_number BIGINT,
-                timestamp TIMESTAMP,
-                asset_id TEXT,
-                from_address TEXT,
-                to_address TEXT,
-                amount NUMERIC,
-                UNIQUE(block_number, from_address, to_address, asset_id, amount)
-            );
-            CREATE INDEX IF NOT EXISTS idx_transfers_block_number ON transfers(block_number);
-            CREATE INDEX IF NOT EXISTS idx_transfers_from_address ON transfers(from_address);
-            CREATE INDEX IF NOT EXISTS idx_transfers_to_address ON transfers(to_address);
-            CREATE INDEX IF NOT EXISTS idx_transfers_asset_id ON transfers(asset_id);
-            """
-            cursor.execute(create_table_sql)
-            
-            # Insert transfers
             insert_sql = """
-            INSERT INTO transfers (block_number, timestamp, asset_id, from_address, to_address, amount)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (block_number, from_address, to_address, asset_id, amount) DO NOTHING
+            INSERT INTO dex_operations (
+                block_number,
+                timestamp,
+                section,
+                method,
+                phase,
+                trader_address,
+                operation_type,
+                -- Omnipool fields
+                asset_in,
+                asset_in_symbol,
+                amount_in,
+                asset_out,
+                asset_out_symbol,
+                amount_out,
+                hub_amount_in,
+                hub_amount_out,
+                asset_fee_amount,
+                protocol_fee_amount,
+                -- Broadcast fields
+                filler,
+                filler_type,
+                operation,
+                inputs,
+                outputs,
+                fees,
+                operation_stack,
+                raw_data
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (block_number, section, method, trader_address, raw_data) DO NOTHING
             """
             
-            for transfer in transfers:
-                cursor.execute(insert_sql, (
-                    transfer['block_number'],
-                    transfer['timestamp'],
-                    transfer['asset_id'],
-                    transfer['from_address'],
-                    transfer['to_address'],
-                    transfer['amount']
-                ))
+            operations_count = 0
+            for event in events:
+                section = event.value['module_id']
+                method = event.value['event_id']
+                
+                if section == 'Omnipool' and method in ['BuyExecuted', 'SellExecuted']:
+                    try:
+                        # Parse event data
+                        data = event.value.get('attributes', {})
+                        if not isinstance(data, dict):
+                            data = json.loads(data)
+                            
+                        # Get asset IDs and symbols
+                        asset_in_id = str(data['asset_in'])
+                        asset_out_id = str(data['asset_out'])
+                        asset_in_symbol = self._ensure_asset_exists_and_get_symbol(asset_in_id)
+                        asset_out_symbol = self._ensure_asset_exists_and_get_symbol(asset_out_id)
+                            
+                        # Convert timestamp to datetime
+                        dt_timestamp = datetime.fromtimestamp(timestamp/1000)
+                        
+                        # Insert operation
+                        cursor.execute(insert_sql, (
+                            block_number,
+                            dt_timestamp,
+                            section,
+                            method,
+                            event.value.get('phase', ''),
+                            data['who'],
+                            method,  # operation_type
+                            asset_in_id,
+                            asset_in_symbol,
+                            str(data['amount_in']),
+                            asset_out_id,
+                            asset_out_symbol,
+                            str(data['amount_out']),
+                            str(data['hub_amount_in']),
+                            str(data['hub_amount_out']),
+                            str(data['asset_fee_amount']),
+                            str(data['protocol_fee_amount']),
+                            None,  # filler
+                            None,  # filler_type
+                            None,  # operation
+                            None,  # inputs
+                            None,  # outputs
+                            None,  # fees
+                            None,  # operation_stack
+                            json.dumps(data)  # raw_data
+                        ))
+                        operations_count += 1
+                        
+                    except Exception as e:
+                        logging.error(f"Error processing Omnipool operation in block {block_number}: {str(e)}")
+                        continue
             
             self.db_connection.commit()
-            logging.info(f"Successfully saved {len(transfers)} transfers")
             
         except Exception as e:
             self.db_connection.rollback()
-            logging.error(f"Error saving transfers: {str(e)}", exc_info=True)
+            logging.error(f"Error saving DEX operations: {str(e)}", exc_info=True)
+            raise
+        finally:
+            cursor.close()
+
+    def _process_broadcast_swapped_events(self, block_number: int, timestamp: int, events: List[dict]) -> None:
+        """Process and save Broadcast.Swapped events from the block."""
+        try:
+            cursor = self.db_connection.cursor()
+            
+            insert_sql = """
+            INSERT INTO broadcast_swaps (
+                block_number,
+                timestamp,
+                swapper,
+                filler,
+                filler_type,
+                operation,
+                input_asset,
+                input_asset_symbol,
+                input_amount,
+                output_asset,
+                output_asset_symbol,
+                output_amount,
+                total_fee_amount,
+                fee_asset,
+                fee_asset_symbol,
+                fee_destinations,
+                operation_stack,
+                raw_data
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (block_number, swapper, input_asset, output_asset, input_amount, output_amount) DO NOTHING
+            """
+            
+            swaps_count = 0
+            for event in events:
+                try:
+                    if (event.value['module_id'] == 'Broadcast' and 
+                        event.value['event_id'] == 'Swapped' and 
+                        'event' in event.value):
+                        
+                        # Get the event data from the correct location
+                        data = event.value['event']['attributes']
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                            
+                        # Get input/output asset info
+                        input_data = data['inputs'][0]  # Assume first input
+                        output_data = data['outputs'][0]  # Assume first output
+                        fee_data = data['fees'][0]  # Use first fee for asset info
+                        
+                        input_asset = str(input_data['asset'])
+                        output_asset = str(output_data['asset'])
+                        fee_asset = str(fee_data['asset'])
+                        
+                        # Get symbols
+                        input_symbol = self._ensure_asset_exists_and_get_symbol(input_asset)
+                        output_symbol = self._ensure_asset_exists_and_get_symbol(output_asset)
+                        fee_symbol = self._ensure_asset_exists_and_get_symbol(fee_asset)
+                        
+                        # Calculate total fee amount
+                        total_fee_amount = sum(fee['amount'] for fee in data['fees'])
+                        
+                        # Process fee destinations
+                        fee_destinations = []
+                        for fee in data['fees']:
+                            destination = fee['destination']
+                            if isinstance(destination, dict):
+                                # Handle Account object
+                                destination = destination.get('Account', '')
+                            fee_destinations.append({
+                                'destination': destination,
+                                'amount': str(fee['amount'])
+                            })
+                        
+                        # Get filler type
+                        filler_type = data['filler_type']
+                        if isinstance(filler_type, dict):
+                            # Handle structured filler type like {"Stableswap": 102}
+                            filler_type = next(iter(filler_type.keys()))
+                            
+                        # Convert timestamp to datetime
+                        dt_timestamp = datetime.fromtimestamp(timestamp/1000)
+                        
+                        # Insert swap
+                        cursor.execute(insert_sql, (
+                            block_number,
+                            dt_timestamp,
+                            data['swapper'],
+                            data['filler'],
+                            filler_type,
+                            data['operation'],
+                            input_asset,
+                            input_symbol,
+                            str(input_data['amount']),
+                            output_asset,
+                            output_symbol,
+                            str(output_data['amount']),
+                            str(total_fee_amount),
+                            fee_asset,
+                            fee_symbol,
+                            json.dumps(fee_destinations),
+                            json.dumps(data['operation_stack']),
+                            json.dumps(data)
+                        ))
+                        swaps_count += 1
+                        
+                except Exception as e:
+                    logging.error(f"Error processing event in block {block_number}: {str(e)}")
+                    continue
+            
+            self.db_connection.commit()
+            
+        except Exception as e:
+            self.db_connection.rollback()
+            logging.error(f"Error saving Broadcast swaps: {str(e)}", exc_info=True)
             raise
         finally:
             cursor.close()
@@ -348,8 +604,16 @@ class BlockProcessor:
             block_hash = block['header']['hash']
             block_timestamp = self._get_block_timestamp(block_hash)
             
+            logging.info(f"Processing block {block_number}")
+            
             # Get events for this block
             events = self.substrate.get_events(block_hash=block_hash)
+            
+            # Process DEX operations (Omnipool only)
+            self._process_dex_events(block_number, block_timestamp, events)
+            
+            # Process Broadcast swaps
+            self._process_broadcast_swapped_events(block_number, block_timestamp, events)
             
             # Process block data using old code's format
             block_data = {
@@ -439,15 +703,6 @@ class BlockProcessor:
                     extrinsic['info'] = json.dumps(extrinsic['info'])
                 for event in extrinsic.get('events', []):
                     event['data'] = json.dumps(event.get('data', {}))
-            
-            # Process and save transfers from onFinalize events
-            logging.info(f"onFinalize events for block {block_number}: {json.dumps(block_data['onFinalize']['events'], indent=2)}")
-            transfers = self._process_transfer_events(
-                block_number=block_number,
-                timestamp=block_timestamp,
-                events=block_data['onFinalize']['events']
-            )
-            self._save_transfers(transfers)
             
             # Insert block data using old code
             self.insert_block_data(self.db_connection, block_data, self.chain_name, self.relay_chain)
