@@ -43,14 +43,14 @@ def create_tables(connection, chain, relay_chain):
     try:
         cursor = connection.cursor()
 
-        delete_table(connection, f"blocks_{relay_chain}_{chain}")
+        delete_table(connection, "blocks")
 
-        cursor.execute(f"""
-            CREATE TABLE IF NOT EXISTS blocks_{relay_chain}_{chain} (
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS blocks (
                 relay_chain VARCHAR(255),
                 chain VARCHAR(255),
                 timestamp BIGINT,
-                number VARCHAR(255) PRIMARY KEY,
+                number VARCHAR(255),
                 hash VARCHAR(255),
                 parenthash VARCHAR(255),
                 stateroot VARCHAR(255),
@@ -60,7 +60,8 @@ def create_tables(connection, chain, relay_chain):
                 oninitialize JSONB,
                 onfinalize JSONB,
                 logs JSONB,
-                extrinsics JSONB
+                extrinsics JSONB,
+                PRIMARY KEY (chain, relay_chain, number)
             )
         """)
         connection.commit()
@@ -81,13 +82,11 @@ def insert_block_data(connection, block_data, chain, relay_chain):
     try:
         cursor = connection.cursor()
         
-        insert_query = f"""
-        INSERT INTO blocks_{relay_chain}_{chain} 
+        insert_query = """
+        INSERT INTO blocks 
         (relay_chain, chain, timestamp, number, hash, parenthash, stateroot, extrinsicsroot, authorid, finalized, oninitialize, onfinalize, logs, extrinsics)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (number) DO UPDATE SET
-        relay_chain = EXCLUDED.relay_chain,
-        chain = EXCLUDED.chain,
+        ON CONFLICT (chain, relay_chain, number) DO UPDATE SET
         timestamp = EXCLUDED.timestamp,
         hash = EXCLUDED.hash,
         parenthash = EXCLUDED.parenthash,
