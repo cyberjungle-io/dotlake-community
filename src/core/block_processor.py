@@ -50,7 +50,9 @@ class BlockProcessor:
         # Create tables using old code
         self._create_tables()
         
-        self.current_block = self.config['chain']['start_block']
+        # Get the last processed block or use start_block from config
+        self.current_block = self._get_last_processed_block() or self.config['chain']['start_block']
+        logging.info(f"Starting from block {self.current_block}")
         self.batch_size = self.global_config['processing']['batch_size']
 
     def _create_tables(self):
@@ -746,4 +748,30 @@ class BlockProcessor:
                     
             except Exception as e:
                 logging.error(f"Error in block processing loop: {str(e)}")
-                time.sleep(5)  # Wait before retrying 
+                time.sleep(5)  # Wait before retrying
+
+    def _get_last_processed_block(self) -> Optional[int]:
+        """Get the last processed block number from the blocks table."""
+        try:
+            cursor = self.db_connection.cursor()
+            cursor.execute(f"""
+                SELECT CAST(number AS BIGINT) as block_num 
+                FROM blocks 
+                WHERE chain = %s 
+                ORDER BY block_num DESC 
+                LIMIT 1
+            """, (self.chain_name,))
+            result = cursor.fetchone()
+            cursor.close()
+            
+            if result:
+                last_block = result[0]
+                logging.info(f"Found last processed block: {last_block}")
+                return last_block + 1  # Return next block to process
+            
+            logging.info("No processed blocks found, starting from config start_block")
+            return None
+            
+        except Exception as e:
+            logging.error(f"Error getting last processed block: {str(e)}", exc_info=True)
+            return None 

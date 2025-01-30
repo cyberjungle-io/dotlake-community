@@ -3,7 +3,7 @@ chain:
   relay_chain: polkadot
   # Local Hydration node
   wss: ws://10.1.20.5:9944
-  start_block: 6665454
+  start_block: 1
   #start_block: 6847454
   block_time: 12  # seconds
   finality_threshold: 2  # blocks
