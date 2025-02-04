@@ -51,8 +51,14 @@ class BlockProcessor:
         self._create_tables()
         
         # Get the last processed block or use start_block from config
-        self.current_block = self._get_last_processed_block() or self.config['chain']['start_block']
-        logging.info(f"Starting from block {self.current_block}")
+        last_processed = self._get_last_processed_block()
+        if last_processed is not None:
+            self.current_block = last_processed
+            logging.info(f"Continuing from last processed block: {self.current_block}")
+        else:
+            self.current_block = self.config['chain']['start_block']
+            logging.info(f"No previous blocks found, starting from config start_block: {self.current_block}")
+        
         self.batch_size = self.global_config['processing']['batch_size']
 
     def _create_tables(self):
@@ -61,8 +67,29 @@ class BlockProcessor:
             # Create blocks table using old code
             self.create_tables(self.db_connection, self.db_config, self.chain_name, self.relay_chain)
             
-            # Create assets table
             cursor = self.db_connection.cursor()
+
+            # Create failed_blocks table
+            create_failed_blocks_sql = """
+            CREATE TABLE IF NOT EXISTS failed_blocks (
+                id SERIAL PRIMARY KEY,
+                block_number BIGINT,
+                chain VARCHAR(255),
+                error_message TEXT,
+                error_type VARCHAR(255),
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                retry_count INTEGER DEFAULT 0,
+                last_retry TIMESTAMP,
+                resolved BOOLEAN DEFAULT FALSE,
+                UNIQUE(block_number, chain)
+            );
+            CREATE INDEX IF NOT EXISTS idx_failed_blocks_number ON failed_blocks(block_number);
+            CREATE INDEX IF NOT EXISTS idx_failed_blocks_chain ON failed_blocks(chain);
+            CREATE INDEX IF NOT EXISTS idx_failed_blocks_resolved ON failed_blocks(resolved);
+            """
+            cursor.execute(create_failed_blocks_sql)
+            
+            # Create assets table
             create_assets_sql = """
             CREATE TABLE IF NOT EXISTS assets (
                 asset_id TEXT PRIMARY KEY,
@@ -379,6 +406,12 @@ class BlockProcessor:
         finally:
             cursor.close()
 
+    def _get_event_data(self, event):
+        """Helper method to get event data regardless of format."""
+        if hasattr(event, 'value'):
+            return event.value
+        return event
+
     def _process_dex_events(self, block_number: int, timestamp: int, events: List[dict]) -> None:
         """Process and save DEX-related events from the block."""
         try:
@@ -420,13 +453,14 @@ class BlockProcessor:
             
             operations_count = 0
             for event in events:
-                section = event.value['module_id']
-                method = event.value['event_id']
+                event_data = self._get_event_data(event)
+                section = event_data.get('module_id')
+                method = event_data.get('event_id')
                 
                 if section == 'Omnipool' and method in ['BuyExecuted', 'SellExecuted']:
                     try:
                         # Parse event data
-                        data = event.value.get('attributes', {})
+                        data = event_data.get('attributes', {})
                         if not isinstance(data, dict):
                             data = json.loads(data)
                             
@@ -445,7 +479,7 @@ class BlockProcessor:
                             dt_timestamp,
                             section,
                             method,
-                            event.value.get('phase', ''),
+                            event_data.get('phase', ''),
                             data['who'],
                             method,  # operation_type
                             asset_in_id,
@@ -515,12 +549,13 @@ class BlockProcessor:
             swaps_count = 0
             for event in events:
                 try:
-                    if (event.value['module_id'] == 'Broadcast' and 
-                        event.value['event_id'] == 'Swapped' and 
-                        'event' in event.value):
+                    event_data = self._get_event_data(event)
+                    if (event_data.get('module_id') == 'Broadcast' and 
+                        event_data.get('event_id') == 'Swapped' and 
+                        'event' in event_data):
                         
                         # Get the event data from the correct location
-                        data = event.value['event']['attributes']
+                        data = event_data['event']['attributes']
                         if isinstance(data, str):
                             data = json.loads(data)
                             
@@ -598,24 +633,126 @@ class BlockProcessor:
         finally:
             cursor.close()
 
+    def _record_failed_block(self, block_number: int, error: Exception) -> None:
+        """Record a failed block in the database."""
+        try:
+            cursor = self.db_connection.cursor()
+            
+            # Check if this block already failed
+            cursor.execute("""
+                SELECT retry_count 
+                FROM failed_blocks 
+                WHERE block_number = %s AND chain = %s
+            """, (block_number, self.chain_name))
+            
+            existing = cursor.fetchone()
+            
+            if existing:
+                # Update existing record
+                cursor.execute("""
+                    UPDATE failed_blocks 
+                    SET retry_count = retry_count + 1,
+                        last_retry = CURRENT_TIMESTAMP,
+                        error_message = %s,
+                        error_type = %s
+                    WHERE block_number = %s AND chain = %s
+                """, (str(error), error.__class__.__name__, block_number, self.chain_name))
+            else:
+                # Insert new record
+                cursor.execute("""
+                    INSERT INTO failed_blocks 
+                    (block_number, chain, error_message, error_type, last_retry)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """, (block_number, self.chain_name, str(error), error.__class__.__name__))
+            
+            self.db_connection.commit()
+        except Exception as e:
+            logging.error(f"Error recording failed block: {str(e)}", exc_info=True)
+        finally:
+            cursor.close()
+
     def process_block(self, block_number: int) -> bool:
         """Process a single block."""
         try:
-            # Fetch block
-            block = self.substrate.get_block(block_number=block_number)
-            block_hash = block['header']['hash']
-            block_timestamp = self._get_block_timestamp(block_hash)
+            # First get just the block hash for this number
+            block_hash = self.substrate.get_block_hash(block_number)
+            if not block_hash:
+                error_msg = f"Could not get hash for block {block_number}"
+                logging.error(error_msg)
+                self._record_failed_block(block_number, Exception(error_msg))
+                return False
+
+            # Get block header first
+            block_header = self.substrate.get_block_header(block_hash)
             
+            # Get timestamp using direct RPC call
+            try:
+                timestamp = self.substrate.query(
+                    module='Timestamp',
+                    storage_function='Now',
+                    block_hash=block_hash
+                )
+                block_timestamp = timestamp.value if timestamp else int(time.time() * 1000)
+            except Exception as e:
+                logging.warning(f"Failed to get timestamp, using current time: {str(e)}")
+                block_timestamp = int(time.time() * 1000)
+
             logging.info(f"Processing block {block_number}")
-            
-            # Get events for this block
-            events = self.substrate.get_events(block_hash=block_hash)
-            
+
+            # Get events using direct query
+            try:
+                # Try using direct RPC call with size limits
+                events_key = self.substrate.get_storage_function_bytes(
+                    module_name='System',
+                    storage_name='Events'
+                )
+                result = self.substrate.rpc_request(
+                    'state_getStorage',
+                    [events_key, block_hash],
+                    params_size_limit=4294967295,
+                    result_size_limit=4294967295
+                )
+                if result.get('result'):
+                    all_events = self.substrate.decode_scale(
+                        type_string='Vec<EventRecord<Event, Hash>>',
+                        scale_bytes=result['result']
+                    )
+                else:
+                    all_events = []
+            except Exception as e:
+                # Fallback to standard query if RPC call fails
+                try:
+                    all_events = self.substrate.query(
+                        module='System',
+                        storage_function='Events',
+                        block_hash=block_hash
+                    )
+                    all_events = all_events.value if all_events else []
+                except Exception as e2:
+                    logging.warning(f"Failed to get events (both methods): {str(e)} / {str(e2)}")
+                    all_events = []
+
+            # Now get the full block with higher limits
+            try:
+                block = self.substrate.get_block(
+                    block_hash=block_hash,
+                    ignore_decoding_errors=True
+                )
+            except Exception as e:
+                logging.warning(f"Could not get full block data: {str(e)}")
+                block = {'header': block_header}
+
             # Process DEX operations (Omnipool only)
-            self._process_dex_events(block_number, block_timestamp, events)
+            try:
+                self._process_dex_events(block_number, block_timestamp, all_events)
+            except Exception as e:
+                logging.error(f"Error processing DEX events: {str(e)}")
             
             # Process Broadcast swaps
-            self._process_broadcast_swapped_events(block_number, block_timestamp, events)
+            try:
+                self._process_broadcast_swapped_events(block_number, block_timestamp, all_events)
+            except Exception as e:
+                logging.error(f"Error processing Broadcast swaps: {str(e)}")
             
             # Process block data using old code's format
             block_data = {
@@ -623,10 +760,10 @@ class BlockProcessor:
                 'chain': self.chain_name,
                 'timestamp': block_timestamp,
                 'number': str(block_number),
-                'hash': block['header']['hash'],
-                'parentHash': block['header']['parentHash'],
-                'stateRoot': block['header']['stateRoot'],
-                'extrinsicsRoot': block['header']['extrinsicsRoot'],
+                'hash': block_header.get('hash', block_hash),  # Use block_hash as fallback
+                'parentHash': block_header.get('parentHash', ''),
+                'stateRoot': block_header.get('stateRoot', ''),
+                'extrinsicsRoot': block_header.get('extrinsicsRoot', ''),
                 'authorId': None,
                 'finalized': True,
                 'onInitialize': {'events': []},
@@ -634,61 +771,67 @@ class BlockProcessor:
                 'logs': block.get('logs', []),
                 'extrinsics': []
             }
-            
-            # Process extrinsics and their events
-            processed_event_indices = []  # Keep track of processed event indices
-            for idx, extrinsic in enumerate(block.get('extrinsics', [])):
-                extrinsic_data = extrinsic.value
-                processed_extrinsic = {
-                    'method': {
-                        'pallet': extrinsic_data.get('call', {}).get('call_module'),
-                        'name': extrinsic_data.get('call', {}).get('call_function')
-                    },
-                    'args': extrinsic_data.get('call', {}).get('call_args', []),
-                    'hash': extrinsic_data.get('extrinsic_hash'),
-                    'success': True,
-                    'paysFee': True,
-                    'events': []
-                }
-                
-                # Add events for this extrinsic
-                for event_idx, event in enumerate(events):
-                    if event.value.get('extrinsic_idx') == idx:
-                        event_data = {
+
+            # If we have full block data, process extrinsics
+            if 'extrinsics' in block:
+                processed_event_indices = []
+                for idx, extrinsic in enumerate(block['extrinsics']):
+                    try:
+                        extrinsic_data = self._get_event_data(extrinsic)
+                        processed_extrinsic = {
                             'method': {
-                                'pallet': event.value['module_id'],
-                                'name': event.value['event_id']
+                                'pallet': extrinsic_data.get('call', {}).get('call_module'),
+                                'name': extrinsic_data.get('call', {}).get('call_function')
                             },
-                            'data': event.value.get('attributes', [])
+                            'args': extrinsic_data.get('call', {}).get('call_args', []),
+                            'hash': extrinsic_data.get('extrinsic_hash'),
+                            'success': True,
+                            'paysFee': True,
+                            'events': []
                         }
-                        processed_extrinsic['events'].append(event_data)
-                        processed_event_indices.append(event_idx)
-                
-                block_data['extrinsics'].append(processed_extrinsic)
-            
-            # Process remaining events into onInitialize and onFinalize
-            for event_idx, event in enumerate(events):
-                if event_idx not in processed_event_indices:
-                    event_data = {
-                        'method': {
-                            'pallet': event.value['module_id'],
-                            'name': event.value['event_id']
-                        },
-                        'data': event.value.get('attributes', [])
-                    }
-                    
-                    # Check phase in event.value
-                    phase = event.value.get('phase', '')
-                    if phase == 'Initialization':
-                        block_data['onInitialize']['events'].append(event_data)
-                    elif phase == 'ApplyExtrinsic':
-                        # Events with ApplyExtrinsic phase but no extrinsic_idx go to onFinalize
-                        block_data['onFinalize']['events'].append(event_data)
-                    else:
-                        # All other events go to onFinalize
-                        block_data['onFinalize']['events'].append(event_data)
-            
-            # Convert nested objects to strings as in old code
+                        
+                        # Add events for this extrinsic
+                        for event_idx, event in enumerate(all_events):
+                            event_data = self._get_event_data(event)
+                            if event_data.get('extrinsic_idx') == idx:
+                                event_data = {
+                                    'method': {
+                                        'pallet': event_data.get('module_id'),
+                                        'name': event_data.get('event_id')
+                                    },
+                                    'data': event_data.get('attributes', [])
+                                }
+                                processed_extrinsic['events'].append(event_data)
+                                processed_event_indices.append(event_idx)
+                        
+                        block_data['extrinsics'].append(processed_extrinsic)
+                    except Exception as e:
+                        logging.error(f"Error processing extrinsic {idx} in block {block_number}: {str(e)}")
+                        continue
+
+                # Process remaining events
+                for event_idx, event in enumerate(all_events):
+                    if event_idx not in processed_event_indices:
+                        try:
+                            event_data = self._get_event_data(event)
+                            event_data = {
+                                'method': {
+                                    'pallet': event_data.get('module_id'),
+                                    'name': event_data.get('event_id')
+                                },
+                                'data': event_data.get('attributes', [])
+                            }
+                            
+                            phase = event_data.get('phase', '')
+                            if phase == 'Initialization':
+                                block_data['onInitialize']['events'].append(event_data)
+                            else:
+                                block_data['onFinalize']['events'].append(event_data)
+                        except Exception as e:
+                            logging.error(f"Error processing event {event_idx} in block {block_number}: {str(e)}")
+                            continue
+
+            # Convert nested objects to strings
             for log in block_data['logs']:
                 if 'value' in log:
                     log['value'] = json.dumps(log['value'])
@@ -713,6 +856,7 @@ class BlockProcessor:
             
         except Exception as e:
             logging.error(f"Error processing block {block_number}: {str(e)}", exc_info=True)
+            self._record_failed_block(block_number, e)
             return False
 
     def process_blocks(self, end_block: Optional[int] = None) -> None:
@@ -754,18 +898,17 @@ class BlockProcessor:
         """Get the last processed block number from the blocks table."""
         try:
             cursor = self.db_connection.cursor()
-            cursor.execute(f"""
-                SELECT CAST(number AS BIGINT) as block_num 
+            cursor.execute("""
+                SELECT number 
                 FROM blocks 
-                WHERE chain = %s 
-                ORDER BY block_num DESC 
+                ORDER BY CAST(number AS BIGINT) DESC 
                 LIMIT 1
-            """, (self.chain_name,))
+            """)
             result = cursor.fetchone()
             cursor.close()
             
-            if result:
-                last_block = result[0]
+            if result and result[0]:
+                last_block = int(result[0])  # Convert string to int
                 logging.info(f"Found last processed block: {last_block}")
                 return last_block + 1  # Return next block to process
             
@@ -775,3 +918,41 @@ class BlockProcessor:
         except Exception as e:
             logging.error(f"Error getting last processed block: {str(e)}", exc_info=True)
             return None 
+
+    def get_failed_blocks(self) -> List[dict]:
+        """Get a list of all failed blocks that haven't been resolved."""
+        try:
+            cursor = self.db_connection.cursor()
+            cursor.execute("""
+                SELECT block_number, error_message, error_type, retry_count, last_retry
+                FROM failed_blocks
+                WHERE chain = %s AND resolved = FALSE
+                ORDER BY block_number ASC
+            """, (self.chain_name,))
+            
+            columns = ['block_number', 'error_message', 'error_type', 'retry_count', 'last_retry']
+            results = []
+            for row in cursor.fetchall():
+                results.append(dict(zip(columns, row)))
+            
+            return results
+        except Exception as e:
+            logging.error(f"Error getting failed blocks: {str(e)}", exc_info=True)
+            return []
+        finally:
+            cursor.close()
+
+    def mark_block_resolved(self, block_number: int) -> None:
+        """Mark a failed block as resolved."""
+        try:
+            cursor = self.db_connection.cursor()
+            cursor.execute("""
+                UPDATE failed_blocks
+                SET resolved = TRUE
+                WHERE block_number = %s AND chain = %s
+            """, (block_number, self.chain_name))
+            self.db_connection.commit()
+        except Exception as e:
+            logging.error(f"Error marking block as resolved: {str(e)}", exc_info=True)
+        finally:
+            cursor.close() 

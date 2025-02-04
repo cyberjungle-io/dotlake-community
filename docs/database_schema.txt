@@ -1,0 +1,285 @@
+# Blocks Table Schema
+
+The blocks table follows a naming pattern of `blocks` for chain-specific data storage.
+
+## Fields
+
+| Field Name      | Data Type      | Description                                                    |
+|----------------|----------------|----------------------------------------------------------------|
+| relay_chain    | VARCHAR(255)   | The name of the relay chain (e.g., 'polkadot')                 |
+| chain          | VARCHAR(255)   | The name of the specific chain being processed                  |
+| timestamp      | BIGINT         | Block timestamp in milliseconds since epoch                     |
+| number         | VARCHAR(255)   | Primary key - The block number as a string                      |
+| hash           | VARCHAR(255)   | The unique hash of the block                                    |
+| parenthash     | VARCHAR(255)   | Hash of the parent block                                        |
+| stateroot      | VARCHAR(255)   | Root hash of the state trie after block execution              |
+| extrinsicsroot | VARCHAR(255)   | Root hash of the extrinsics trie                               |
+| authorid       | VARCHAR(255)   | ID of the block author/validator (nullable)                     |
+| finalized      | BOOLEAN        | Whether the block is finalized                                  |
+| oninitialize   | JSONB          | JSON containing events that occurred during block initialization|
+| onfinalize     | JSONB          | JSON containing events that occurred during block finalization  |
+| logs           | JSONB          | JSON array containing block logs                                |
+| extrinsics     | JSONB          | JSON array containing block extrinsics                         |
+
+## JSONB Field Details
+
+### oninitialize and onfinalize
+These fields contain arrays of events that occurred during the block's initialization and finalization phases respectively. Each event includes:
+- method (pallet and event name)
+- associated data
+
+### logs
+Contains block-level logs including system events and other chain-specific logging information.
+
+### extrinsics
+Contains an array of transactions/calls made in the block. Each extrinsic includes:
+- method (pallet and function name)
+- arguments
+- hash
+- success status
+- fee information
+- associated events
+
+## Usage
+This table is used to store blockchain block data in a structured format, allowing for efficient querying and analysis of the chain's history. The JSONB fields allow for flexible storage of nested data structures while maintaining queryability.
+
+# Assets Table Schema
+
+tablename = assets
+
+The assets table stores information about all assets (tokens) that are tracked in the system.
+
+## Fields
+
+| Field Name  | Data Type | Description                                              |
+|------------|-----------|----------------------------------------------------------|
+| asset_id   | TEXT      | Primary key - Unique identifier for the asset            |
+| name       | TEXT      | Full name of the asset                                   |
+| symbol     | TEXT      | Trading symbol of the asset                              |
+| decimals   | INTEGER   | Number of decimal places for the asset                   |
+| is_native  | BOOLEAN   | Whether this is the chain's native token (default false) |
+| created_at | TIMESTAMP | When the asset was first added to the database           |
+
+## Usage
+This table maintains a registry of all assets that can be transferred, traded, or otherwise involved in chain operations. It serves as a reference table for other tables that need to reference assets by their ID. The `decimals` field is particularly important for proper handling of token amounts in calculations and display.
+
+## Key Features
+- `asset_id` is used as the primary key and referenced by other tables
+- `is_native` flag helps identify the chain's native token
+- Automatic timestamp tracking of when assets are added
+- Support for updating asset details through ON CONFLICT clause
+
+## Example Assets
+Some known assets that are typically present:
+- Native token (HDX)
+- Fee token (LRNA)
+- Stablecoins (DAI, USDC)
+
+# Broadcast Swaps Table Schema
+
+tablename = broadcast_swaps
+
+The broadcast_swaps table records detailed information about token swap operations executed through the broadcast mechanism in the DEX. Each record represents a single swap transaction with comprehensive details about the assets involved, fees, and routing information.
+
+## Fields
+
+| Field Name         | Data Type | Description                                                         |
+|-------------------|-----------|---------------------------------------------------------------------|
+| id                | SERIAL    | Primary key - Auto-incrementing identifier                          |
+| block_number      | BIGINT    | Block number where the swap occurred                                |
+| timestamp         | TIMESTAMP | When the swap was executed                                          |
+| swapper          | TEXT      | Address of the user initiating the swap                             |
+| filler           | TEXT      | Address of the entity that filled/executed the swap                  |
+| filler_type      | TEXT      | Type of filler (e.g., Stableswap, Omnipool)                        |
+| operation        | TEXT      | Type of operation being performed                                    |
+| input_asset      | TEXT      | Foreign key to assets.asset_id for the input token                  |
+| input_asset_symbol| TEXT      | Symbol of the input token (for quick reference)                     |
+| input_amount     | NUMERIC   | Amount of input token being swapped                                 |
+| output_asset     | TEXT      | Foreign key to assets.asset_id for the output token                 |
+| output_asset_symbol| TEXT     | Symbol of the output token (for quick reference)                    |
+| output_amount    | NUMERIC   | Amount of output token received                                     |
+| total_fee_amount | NUMERIC   | Total amount of fees paid for the swap                              |
+| fee_asset        | TEXT      | Foreign key to assets.asset_id for the fee token                    |
+| fee_asset_symbol | TEXT      | Symbol of the fee token (for quick reference)                       |
+| fee_destinations | JSONB     | Array of fee distribution details {destination, amount}             |
+| operation_stack  | JSONB     | Detailed routing information about how the swap was executed        |
+| created_at       | TIMESTAMP | When the record was created (default: CURRENT_TIMESTAMP)            |
+| raw_data         | JSONB     | Complete raw data of the swap event for reference                   |
+
+## Indexes
+The table includes several indexes for optimizing different query patterns:
+- `idx_broadcast_swaps_block_number` on (block_number)
+- `idx_broadcast_swaps_timestamp` on (timestamp)
+- `idx_broadcast_swaps_swapper` on (swapper)
+- `idx_broadcast_swaps_filler` on (filler)
+- `idx_broadcast_swaps_operation` on (operation)
+- `idx_broadcast_swaps_input_asset_symbol` on (input_asset_symbol)
+- `idx_broadcast_swaps_output_asset_symbol` on (output_asset_symbol)
+- `idx_broadcast_swaps_filler_type` on (filler_type)
+
+## Constraints
+- Primary Key: id (auto-incrementing)
+- Foreign Keys:
+  - input_asset references assets(asset_id)
+  - output_asset references assets(asset_id)
+  - fee_asset references assets(asset_id)
+- Unique Constraint: (block_number, swapper, input_asset, output_asset, input_amount, output_amount)
+
+## JSONB Field Details
+
+### fee_destinations
+An array of objects containing fee distribution information:
+```json
+[
+  {
+    "destination": "address",
+    "amount": "numeric_amount"
+  }
+]
+```
+
+### operation_stack
+Contains the detailed routing path of how the swap was executed through the DEX. This can include multiple steps and operations that were performed to complete the swap.
+
+### raw_data
+Complete event data as received from the blockchain, stored for reference and debugging purposes.
+
+## Usage
+This table is crucial for:
+- Tracking all DEX swap activities
+- Analyzing trading patterns and volumes
+- Calculating fees collected and their distribution
+- Monitoring DEX usage and performance
+- Auditing purposes and transaction verification
+
+The combination of indexed fields allows for efficient querying based on:
+- Time-based analysis (block_number, timestamp)
+- User activity (swapper)
+- Market maker analysis (filler)
+- Token pair analysis (input_asset_symbol, output_asset_symbol)
+- DEX mechanism analysis (filler_type, operation)
+
+# DEX Operations Table Schema
+
+tablename = dex_operations
+
+The dex_operations table records all operations performed in the DEX, with a particular focus on Omnipool operations. This table provides a comprehensive view of trading activities, including both Omnipool-specific operations and broadcast-related activities.
+
+## Fields
+
+| Field Name         | Data Type | Description                                                         |
+|-------------------|-----------|---------------------------------------------------------------------|
+| id                | SERIAL    | Primary key - Auto-incrementing identifier                          |
+| block_number      | BIGINT    | Block number where the operation occurred                           |
+| timestamp         | TIMESTAMP | When the operation was executed                                     |
+| section           | TEXT      | Module/section where the operation occurred                           |
+| method            | TEXT      | Specific method/event name (e.g., 'BuyExecuted', 'SellExecuted')    |
+| phase            | TEXT      | Phase of block execution when the operation occurred                |
+| trader_address   | TEXT      | Address of the trader performing the operation                      |
+| operation_type   | TEXT      | Type of operation being performed                                   |
+
+### Omnipool Specific Fields
+| Field Name         | Data Type | Description                                                         |
+|-------------------|-----------|---------------------------------------------------------------------|
+| asset_in          | TEXT      | Foreign key to assets.asset_id for input token                      |
+| asset_in_symbol   | TEXT      | Symbol of the input token (for quick reference)                     |
+| amount_in         | NUMERIC   | Amount of input token                                               |
+| asset_out         | TEXT      | Foreign key to assets.asset_id for output token                     |
+| asset_out_symbol  | TEXT      | Symbol of the output token (for quick reference)                    |
+| amount_out        | NUMERIC   | Amount of output token                                              |
+| hub_amount_in     | NUMERIC   | Amount of hub token received                                        |
+| hub_amount_out    | NUMERIC   | Amount of hub token paid                                            |
+| asset_fee_amount  | NUMERIC   | Fee amount in terms of the asset                                    |
+| protocol_fee_amount| NUMERIC   | Protocol fee amount                                                 |
+
+### Broadcast Related Fields
+| Field Name         | Data Type | Description                                                         |
+|-------------------|-----------|---------------------------------------------------------------------|
+| filler            | TEXT      | Address of the entity that filled the operation                     |
+| filler_type       | TEXT      | Type of filler (e.g., Stableswap, Omnipool)                        |
+| operation         | TEXT      | Specific operation being performed                                   |
+| inputs            | JSONB     | Detailed information about input assets and amounts                  |
+| outputs           | JSONB     | Detailed information about output assets and amounts                 |
+| fees              | JSONB     | Fee information including destinations and amounts                   |
+| operation_stack   | JSONB     | Routing information about operation execution                       |
+
+### Metadata Fields
+| Field Name         | Data Type | Description                                                         |
+|-------------------|-----------|---------------------------------------------------------------------|
+| created_at        | TIMESTAMP | When the record was created (default: CURRENT_TIMESTAMP)            |
+| raw_data          | JSONB     | Complete raw event data for reference                               |
+
+## Indexes
+The table includes several indexes for optimizing different query patterns:
+- `idx_dex_operations_block_number` on (block_number)
+- `idx_dex_operations_trader` on (trader_address)
+- `idx_dex_operations_section` on (section)
+- `idx_dex_operations_method` on (method)
+- `idx_dex_operations_timestamp` on (timestamp)
+- `idx_dex_operations_operation_type` on (operation_type)
+- `idx_dex_operations_asset_in_symbol` on (asset_in_symbol)
+- `idx_dex_operations_asset_out_symbol` on (asset_out_symbol)
+
+## Constraints
+- Primary Key: id (auto-incrementing)
+- Foreign Keys:
+  - asset_in references assets(asset_id)
+  - asset_out references assets(asset_id)
+- Unique Constraint: (block_number, section, method, trader_address, raw_data)
+
+## JSONB Field Details
+
+### inputs and outputs
+Arrays containing detailed information about the assets involved in the operation:
+```json
+[
+  {
+    "asset": "asset_id",
+    "amount": "numeric_amount"
+  }
+]
+```
+
+### fees
+Detailed fee information including distribution:
+```json
+[
+  {
+    "asset": "asset_id",
+    "amount": "numeric_amount",
+    "destination": "address"
+  }
+]
+```
+
+### operation_stack
+Contains the routing information and steps taken during operation execution. Format varies based on operation type.
+
+### raw_data
+Complete event data as received from the blockchain, stored for reference and debugging purposes.
+
+## Usage
+This table serves multiple purposes:
+- Recording all DEX operations, particularly Omnipool activities
+- Tracking trading volumes and patterns
+- Monitoring fee collection and distribution
+- Analyzing DEX performance and usage
+- Supporting audit and compliance requirements
+
+The table design accommodates both:
+1. Omnipool-specific operations with detailed hub token and fee tracking
+2. Broadcast operations with comprehensive routing and execution information
+
+The extensive indexing supports efficient querying for:
+- Time-series analysis (block_number, timestamp)
+- Trader activity analysis (trader_address)
+- Operation type analysis (section, method, operation_type)
+- Token pair analysis (asset_in_symbol, asset_out_symbol)
+- Performance monitoring and optimization
+
+Common query patterns include:
+- Volume analysis by token pair
+- Fee collection analysis
+- Trader activity monitoring
+- Market maker performance tracking
+- Protocol usage statistics

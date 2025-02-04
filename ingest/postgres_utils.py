@@ -43,8 +43,6 @@ def create_tables(connection, chain, relay_chain):
     try:
         cursor = connection.cursor()
 
-        delete_table(connection, "blocks")
-
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS blocks (
                 relay_chain VARCHAR(255),
