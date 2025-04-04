@@ -1,0 +1,114 @@
+Database Schema for HydraDX Chain Data
+
+The database consists of the following tables:
+
+Each table will have a primary column or field section.  The field or column name will be immediately following the *.
+following the field or column name will be the data type in parentheses. After the : will be the description of the field or column.
+
+1. blocks
+- Stores basic block information from the chain
+- Primary columns or fields for the blocks table:
+  * number (INT8): Block number, primary key
+  * hash (VARCHAR(255)): Block hash
+  * timestamp (BIGINT): Block creation time in epoch milliseconds
+  * chain (VARCHAR(255)): Chain identifier
+  * relay_chain (VARCHAR(255)): Parent relay chain name
+  * parenthash (VARCHAR(255)): Hash of parent block
+  * stateroot (VARCHAR(255)): State root hash
+  * extrinsicsroot (VARCHAR(255)): Extrinsics root hash
+  * authorid (VARCHAR(255)): Block author/validator ID
+  * finalized (BOOLEAN): Whether block is finalized
+  * oninitialize (JSONB): Block initialization events
+  * onfinalize (JSONB): Block finalization events
+  * logs (JSONB): Block logs
+  * extrinsics (JSONB): Block extrinsics data
+- Composite primary key (chain, relay_chain, number)
+- Contains block events and extrinsics data
+- Indexed on block number and chain
+
+2. failed_blocks
+- Tracks blocks that failed processing
+- Primary columns or fields for the failed_blocks table:
+  * id (SERIAL): Primary key
+  * block_number (BIGINT): Failed block number
+  * chain (VARCHAR): Chain identifier
+  * error_message (TEXT): Full error message
+  * error_type (VARCHAR): Type of error
+  * timestamp (TIMESTAMP): When failure occurred
+  * retry_count (INTEGER): Number of retry attempts
+  * last_retry (TIMESTAMP): Last retry timestamp
+  * resolved (BOOLEAN): Whether issue is resolved
+- Indexed on block_number, chain, and resolved status
+
+3. assets
+- Stores information about all assets/tokens
+- Primary columns or fields for the assets table:
+  * asset_id (TEXT): Unique asset identifier
+  * name (TEXT): Asset name
+  * symbol (TEXT): Asset symbol (e.g., HDX, LRNA)
+  * decimals (INTEGER): Number of decimal places
+  * is_native (BOOLEAN): Whether asset is chain native
+- Primary key is asset_id
+
+4. transfers
+- Records token transfer events
+- Primary columns or fields for the transfers table:
+  * id (SERIAL): Primary key
+  * block_number (BIGINT): Block where transfer occurred
+  * timestamp (TIMESTAMP): When transfer occurred
+  * asset_id (TEXT): Asset being transferred
+  * from_address (TEXT): Sender address
+  * to_address (TEXT): Recipient address
+  * amount (NUMERIC): Transfer amount
+- Foreign key to assets(asset_id)
+- Indexed on block_number, from_address, to_address, asset_id
+
+5. dex_operations
+- Tracks DEX trading operations (Omnipool)
+- Primary columns or fields for the dex_operations table:
+  * id (SERIAL): Primary key
+  * block_number (BIGINT): Block where operation occurred
+  * timestamp (TIMESTAMP): When operation occurred
+  * section (TEXT): Operation section (e.g., Omnipool)
+  * method (TEXT): Operation method (e.g., BuyExecuted)
+  * trader_address (TEXT): Trader's address
+  * operation_type (TEXT): Type of operation
+  * asset_in (TEXT): Assets involved
+  * asset_out (TEXT): Assets involved
+  * asset_in_symbol (TEXT): Assets involved
+  * asset_out_symbol (TEXT): Assets involved
+  * amount_in (NUMERIC): Trade amounts
+  * amount_out (NUMERIC): Trade amounts
+  * hub_amount_in (NUMERIC): Hub pool amounts
+  * hub_amount_out (NUMERIC): Hub pool amounts
+  * asset_fee_amount (NUMERIC): Asset fee amount
+  * protocol_fee_amount (NUMERIC): Protocol fee amount
+- Additional fields for broadcast operations
+- Indexed on block_number, trader_address, operation_type
+- Foreign keys to assets table
+
+6. broadcast_swaps
+- Records broadcast swap operations
+- Primary columns or fields for the broadcast_swaps table:
+  * id (SERIAL): Primary key
+  * block_number (BIGINT): Block where swap occurred
+  * timestamp (TIMESTAMP): When swap occurred
+  * swapper (TEXT): Swapper's address
+  * filler (TEXT): Filler's address
+  * filler_type (TEXT): Type of filler
+  * operation (TEXT): Operation type
+  * input_asset/output_asset (TEXT): Assets involved
+  * input_amount/output_amount (NUMERIC): Swap amounts
+  * total_fee_amount (NUMERIC): Total fees
+  * fee_asset (TEXT): Fee asset
+  * fee_destinations (JSONB): Fee distribution
+  * operation_stack (JSONB): Operation details
+- Indexed on block_number, swapper, assets
+- Foreign keys to assets table
+
+Relationships:
+- transfers.asset_id → assets.asset_id
+- dex_operations.asset_in/asset_out → assets.asset_id
+- broadcast_swaps.input_asset/output_asset/fee_asset → assets.asset_id
+
+Note: All monetary amounts are stored as NUMERIC to preserve precision. Timestamps are stored as TIMESTAMP type. JSON data is stored as JSONB for efficient querying.

@@ -80,14 +80,14 @@ def query_last_block(db_connection, database_info: Dict[str, Any], chain: str, r
 
     if block_num is None:
         if database_info['database'] == 'bigquery':
-            fetch_last_block_query = f"SELECT * FROM {database_info['database_dataset']}.{database_info['database_table']} ORDER BY number DESC LIMIT 1"
+            fetch_last_block_query = f"SELECT * FROM {database_info['database_dataset']}.{database_info['database_table']} ORDER BY CAST(number AS INT64) DESC LIMIT 1"
         else:
             fetch_last_block_query = f"SELECT * FROM blocks WHERE chain = '{chain}' AND relay_chain = '{relay_chain}' ORDER BY number DESC LIMIT 1"
     else:
         if database_info['database'] == 'bigquery':
-            fetch_last_block_query = f"SELECT * FROM {database_info['database_dataset']}.{database_info['database_table']} WHERE number='{block_num}' LIMIT 1"
+            fetch_last_block_query = f"SELECT * FROM {database_info['database_dataset']}.{database_info['database_table']} WHERE number={block_num} LIMIT 1"
         elif database_info['database'] == 'postgres':
-            fetch_last_block_query = f"SELECT * FROM blocks WHERE chain = '{chain}' AND relay_chain = '{relay_chain}' AND number='{block_num}' LIMIT 1"
+            fetch_last_block_query = f"SELECT * FROM blocks WHERE chain = '{chain}' AND relay_chain = '{relay_chain}' AND number={block_num} LIMIT 1"
         else:
             fetch_last_block_query = f"SELECT * FROM blocks WHERE chain = '{chain}' AND relay_chain = '{relay_chain}' AND number={block_num} LIMIT 1"
     return query(db_connection, fetch_last_block_query)

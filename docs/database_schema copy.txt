@@ -1,10 +1,6 @@
 # Blocks Table Schema
 We are using a postgres database
-timestamps are in the format like this example: 2025-01-28 18:29:48 
 If your timestamp column is already a proper timestamp type, just truncate it directly — no need to convert from milliseconds:
-
-The assets table field decimals is use to understand how to shift a tokens value. for example if a token number is 123456789123456 and the decimals file is 12
-the number would be 123456789123456/1000000000000 or 123.456789123456.  When working with token values alway shift the results.
 
 The blocks table follows a naming pattern of `blocks` for chain-specific data storage.
 
@@ -62,7 +58,7 @@ The assets table stores information about all assets (tokens) that are tracked i
 | asset_id   | TEXT      | Primary key - Unique identifier for the asset            |
 | name       | TEXT      | Full name of the asset                                   |
 | symbol     | TEXT      | Trading symbol of the asset                              |
-| decimals   | INTEGER   | Number of decimal places for the asset. this is the number to the power of ten that a token divided by                  |
+| decimals   | INTEGER   | Number of decimal places for the asset                   |
 | is_native  | BOOLEAN   | Whether this is the chain's native token (default false) |
 | created_at | TIMESTAMP | When the asset was first added to the database           |
 
@@ -94,17 +90,17 @@ use the the symbol field when refering to a Token.  input_asset_symbol or output
 |-------------------|-----------|---------------------------------------------------------------------|
 | id                | SERIAL    | Primary key - Auto-incrementing identifier                          |
 | block_number      | BIGINT    | Block number where the swap occurred                                |
-| timestamp         | TIMESTAMP | This is a timestamp field type.When the swap was executed                                          |
+| timestamp         | TIMESTAMP | When the swap was executed                                          |
 | swapper          | TEXT      | Address of the user initiating the swap                             |
 | filler           | TEXT      | Address of the entity that filled/executed the swap                  |
 | filler_type      | TEXT      | Type of filler (e.g., Stableswap, Omnipool)   do not include this unless requested                     |
 | operation        | TEXT      | Type of operation being performed                                    |
 | input_asset      | TEXT      | Foreign key to assets.asset_id for the input token                  |
 | input_asset_symbol| TEXT      | Symbol of the input token (for quick reference)                     |
-| input_amount     | NUMERIC   | Amount of input token being swapped  (this number needs to be shifted)                               |
+| input_amount     | NUMERIC   | Amount of input token being swapped                                 |
 | output_asset     | TEXT      | Foreign key to assets.asset_id for the output token                 |
 | output_asset_symbol| TEXT     | Symbol of the output token. use this field when refering to the output asset  |
-| output_amount    | NUMERIC   | Amount of output tokens received (this number needs to be shifted)                                     |
+| output_amount    | NUMERIC   | Amount of output token received                                     |
 | total_fee_amount | NUMERIC   | Total amount of fees paid for the swap                              |
 | fee_asset        | TEXT      | Foreign key to assets.asset_id for the fee token                    |
 | fee_asset_symbol | TEXT      | Symbol of the fee token (for quick reference)                       |
@@ -113,11 +109,24 @@ use the the symbol field when refering to a Token.  input_asset_symbol or output
 | created_at       | TIMESTAMP | When the record was created (default: CURRENT_TIMESTAMP)            |
 | raw_data         | JSONB     | Complete raw data of the swap event for reference                   |
 
-
+## Indexes
+The table includes several indexes for optimizing different query patterns:
+- `idx_broadcast_swaps_block_number` on (block_number)
+- `idx_broadcast_swaps_timestamp` on (timestamp)
+- `idx_broadcast_swaps_swapper` on (swapper)
+- `idx_broadcast_swaps_filler` on (filler)
+- `idx_broadcast_swaps_operation` on (operation)
+- `idx_broadcast_swaps_input_asset_symbol` on (input_asset_symbol)
+- `idx_broadcast_swaps_output_asset_symbol` on (output_asset_symbol)
+- `idx_broadcast_swaps_filler_type` on (filler_type)
 
 ## Constraints
 - Primary Key: id (auto-incrementing)
--
+- Foreign Keys:
+  - input_asset references assets(asset_id)
+  - output_asset references assets(asset_id)
+  - fee_asset references assets(asset_id)
+- Unique Constraint: (block_number, swapper, input_asset, output_asset, input_amount, output_amount)
 
 ## JSONB Field Details
 
@@ -177,12 +186,12 @@ The dex_operations table records all operations performed in the DEX, with a par
 |-------------------|-----------|---------------------------------------------------------------------|
 | asset_in          | TEXT      | Foreign key to assets.asset_id for input token                      |
 | asset_in_symbol   | TEXT      | Symbol of the input token (for quick reference)                     |
-| amount_in         | NUMERIC   | Amount of input token      (this number needs to be shifted)                                         |
-| asset_out         | TEXT      | Foreign key to assets.asset_id for output token    (this number needs to be shifted)                 |
+| amount_in         | NUMERIC   | Amount of input token                                               |
+| asset_out         | TEXT      | Foreign key to assets.asset_id for output token                     |
 | asset_out_symbol  | TEXT      | Symbol of the output token (for quick reference)                    |
 | amount_out        | NUMERIC   | Amount of output token                                              |
-| hub_amount_in     | NUMERIC   | Amount of hub token received   (this number needs to be shifted)                                     |
-| hub_amount_out    | NUMERIC   | Amount of hub token paid      (this number needs to be shifted)                                      |
+| hub_amount_in     | NUMERIC   | Amount of hub token received                                        |
+| hub_amount_out    | NUMERIC   | Amount of hub token paid                                            |
 | asset_fee_amount  | NUMERIC   | Fee amount in terms of the asset                                    |
 | protocol_fee_amount| NUMERIC   | Protocol fee amount                                                 |
 
@@ -203,7 +212,16 @@ The dex_operations table records all operations performed in the DEX, with a par
 | created_at        | TIMESTAMP | When the record was created (default: CURRENT_TIMESTAMP)            |
 | raw_data          | JSONB     | Complete raw event data for reference                               |
 
-
+## Indexes
+The table includes several indexes for optimizing different query patterns:
+- `idx_dex_operations_block_number` on (block_number)
+- `idx_dex_operations_trader` on (trader_address)
+- `idx_dex_operations_section` on (section)
+- `idx_dex_operations_method` on (method)
+- `idx_dex_operations_timestamp` on (timestamp)
+- `idx_dex_operations_operation_type` on (operation_type)
+- `idx_dex_operations_asset_in_symbol` on (asset_in_symbol)
+- `idx_dex_operations_asset_out_symbol` on (asset_out_symbol)
 
 ## Constraints
 - Primary Key: id (auto-incrementing)
@@ -214,7 +232,28 @@ The dex_operations table records all operations performed in the DEX, with a par
 
 ## JSONB Field Details
 
+### inputs and outputs
+Arrays containing detailed information about the assets involved in the operation:
+```json
+[
+  {
+    "asset": "asset_id",
+    "amount": "numeric_amount"
+  }
+]
+```
 
+### fees
+Detailed fee information including distribution:
+```json
+[
+  {
+    "asset": "asset_id",
+    "amount": "numeric_amount",
+    "destination": "address"
+  }
+]
+```
 
 ### operation_stack
 Contains the routing information and steps taken during operation execution. Format varies based on operation type.

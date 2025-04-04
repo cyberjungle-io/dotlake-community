@@ -759,7 +759,7 @@ class BlockProcessor:
                 'relay_chain': self.relay_chain,
                 'chain': self.chain_name,
                 'timestamp': block_timestamp,
-                'number': str(block_number),
+                'number': block_number,  # Store as integer for INT8 column
                 'hash': block_header.get('hash', block_hash),  # Use block_hash as fallback
                 'parentHash': block_header.get('parentHash', ''),
                 'stateRoot': block_header.get('stateRoot', ''),

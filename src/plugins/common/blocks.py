@@ -52,7 +52,7 @@ class BlocksPlugin(Plugin):
                     relay_chain VARCHAR(255),
                     chain VARCHAR(255),
                     timestamp BIGINT,
-                    number VARCHAR(255) PRIMARY KEY,
+                    number INT8 PRIMARY KEY,
                     hash VARCHAR(255),
                     parenthash VARCHAR(255),
                     stateroot VARCHAR(255),
@@ -79,7 +79,7 @@ class BlocksPlugin(Plugin):
                 'relay_chain': self.relay_chain,
                 'chain': self.chain_name,
                 'timestamp': block_timestamp,
-                'number': str(block_number),  # Store as string like old code
+                'number': block_number,  # Store as integer for INT8 column
                 'hash': block['header']['hash'],
                 'parentHash': block['header']['parentHash'],
                 'stateRoot': block['header']['stateRoot'],

@@ -48,7 +48,7 @@ def create_tables(connection, chain, relay_chain):
                 relay_chain VARCHAR(255),
                 chain VARCHAR(255),
                 timestamp BIGINT,
-                number VARCHAR(255),
+                number INT8,
                 hash VARCHAR(255),
                 parenthash VARCHAR(255),
                 stateroot VARCHAR(255),
